@@ -1,5 +1,32 @@
 const http = require("http");
 
+const rateLimitMap = new Map();
+
+function isRateLimited(ip) {
+  const now = Date.now();
+  const windowMs = 60 * 1000;
+  const maxRequests = 10;
+
+  const data = rateLimitMap.get(ip);
+
+  if (!data || now - data.startTime > windowMs) {
+    rateLimitMap.set(ip, {
+      count: 1,
+      startTime: now
+    });
+
+    return false;
+  }
+
+  data.count++;
+
+  if (data.count > maxRequests) {
+    return true;
+  }
+
+  return false;
+}
+
 async function main() {
   const { GoogleGenAI } = await import("@google/genai");
 
@@ -19,7 +46,29 @@ async function main() {
       return;
     }
 
+
+
     if (req.method === "POST" && req.url === "/explain") {
+
+      const forwarded = req.headers["x-forwarded-for"];
+
+      const ip = forwarded
+        ? forwarded.split(",")[0].trim()
+        : req.socket.remoteAddress;
+
+      if (isRateLimited(ip)){
+        res.wrineHead(429,{
+          "Content-Type": "application/json; charset=utf-8"
+        });
+
+        res.end(JSON.stringify({
+          result: "短時間に多くのリクエストが送信されました。1分ほど待ってからもう一度お試しください。"
+        }));
+
+        return;
+      }
+
+
       let body = "";
 
       req.on("data", chunk => {
@@ -32,6 +81,30 @@ async function main() {
 
           const text = data.text;
           const mode = data.mode;
+
+          if(!text || typeof text !== "string"){
+            res.writeHead(400, {
+              "Content-Type": "application/json; charaset=utf-8"
+            });
+
+            res.end(JSON.stringify({
+              result: "解説する文章がありません。"
+            }));
+
+            return;
+          }
+
+          if (text.length > 5000) {
+            res.writeHead(413, {
+              "Content-Type": "application/json; charset=utf-8"
+            });
+
+            res.end(JSON.stringify({
+              result: "文章が長すぎます。5000文字以内で選択してください。"
+            }));
+
+            return;
+          }
 
           console.log("受け取ったmode:", mode);
 
