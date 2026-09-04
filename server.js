@@ -81,6 +81,7 @@ async function main() {
 
           const text = data.text;
           const mode = data.mode;
+          const language = data.language;
 
           if(!text || typeof text !== "string"){
             res.writeHead(400, {
@@ -111,6 +112,17 @@ async function main() {
           let instruction = "";
 
           if (mode === "easy") {
+            if (language === "en"){
+              instruction = `
+          Explain the following text in simple English.
+          
+          Conditions:
+          - Use easy words
+          - Keep it to about 3 to 5 sentences
+          - Explain technical terms if necessary
+          - Include one simple example
+          `;
+            } else {
             instruction = `
 あなたは初心者向けの家庭教師です。
 
@@ -124,8 +136,21 @@ async function main() {
 - 細かい背景説明は省く
 `;
           }
-
+        }
           if (mode === "detail") {
+            if (language === "en") {
+              instruction = `
+              Explain the following text in detail for a university-level reader.
+              
+              
+              Conditions;
+              - Expain background knowledge
+              - Explain technical terms
+              - Explain why it works that way
+              - Include examples
+              - Do not make it too short
+              `;
+            } else {
             instruction = `
 あなたは大学の名無しの講師です。
 
@@ -140,8 +165,20 @@ async function main() {
 - 短くまとめすぎない
 `;
           }
+       }
 
           if (mode === "summary") {
+            if (language === "en"){
+              instruction = `
+          Summarize the following text.
+          
+          Conditions:
+          - Do not explain in detail
+          - Extract only the most important points
+          - Use no more than 3 bullet points
+          - keep each point short
+          `;
+            } else {
             instruction = `
 あなたは文章要約の専門家です。
 
@@ -155,7 +192,7 @@ async function main() {
 - 元の文章にない情報を追加しない
 `;
           }
-
+        }
           // modeが無い場合の保険
           if (!instruction) {
             instruction = `
