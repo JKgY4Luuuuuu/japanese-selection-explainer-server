@@ -8,16 +8,11 @@ const rateLimitMap = new Map();
 
 function isRateLimited(ip) {
   const now = Date.now();
-
-  // 1分
   const windowMs = 60 * 1000;
-
-  // 1分に10回まで
   const maxRequests = 10;
 
   const data = rateLimitMap.get(ip);
 
-  // 初回、または1分以上経過していた場合
   if (!data || now - data.startTime > windowMs) {
     rateLimitMap.set(ip, {
       count: 1,
@@ -29,11 +24,62 @@ function isRateLimited(ip) {
 
   data.count++;
 
-  if (data.count > maxRequests) {
-    return true;
+  return data.count > maxRequests;
+}
+
+// -------------------------
+// Gemini 503対策
+// -------------------------
+
+async function generateWithRetry(
+  ai,
+  params,
+  maxRetries = 2
+) {
+  let lastError;
+
+  for (
+    let attempt = 0;
+    attempt <= maxRetries;
+    attempt++
+  ) {
+    try {
+      return await ai.models.generateContent(params);
+    } catch (error) {
+      lastError = error;
+
+      const message =
+        String(error?.message || "");
+
+      const isTemporary =
+        message.includes("503") ||
+        message.includes("UNAVAILABLE") ||
+        message.includes("high demand");
+
+      // 一時エラー以外ならそのまま終了
+      if (!isTemporary) {
+        throw error;
+      }
+
+      // 最後の試行まで失敗したら終了
+      if (attempt === maxRetries) {
+        throw error;
+      }
+
+      const waitTime =
+        1500 * (attempt + 1);
+
+      console.log(
+        `Gemini一時エラー。${waitTime}ms後に再試行します。`
+      );
+
+      await new Promise(resolve =>
+        setTimeout(resolve, waitTime)
+      );
+    }
   }
 
-  return false;
+  throw lastError;
 }
 
 // -------------------------
@@ -41,152 +87,146 @@ function isRateLimited(ip) {
 // -------------------------
 
 async function main() {
-  const { GoogleGenAI } = await import("@google/genai");
+  const { GoogleGenAI } =
+    await import("@google/genai");
 
   const ai = new GoogleGenAI({
     apiKey: process.env.GEMINI_API_KEY
   });
 
-  const server = http.createServer(async (req, res) => {
-
-    // -------------------------
-    // CORS
-    // -------------------------
-
-    res.setHeader(
-      "Access-Control-Allow-Origin",
-      "*"
-    );
-
-    res.setHeader(
-      "Access-Control-Allow-Headers",
-      "Content-Type"
-    );
-
-    res.setHeader(
-      "Access-Control-Allow-Methods",
-      "POST, OPTIONS"
-    );
-
-    if (req.method === "OPTIONS") {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-
-    // -------------------------
-    // /explain
-    // -------------------------
-
-    if (
-      req.method === "POST" &&
-      req.url === "/explain"
-    ) {
+  const server =
+    http.createServer(async (req, res) => {
 
       // -------------------------
-      // IPアドレス取得
+      // CORS
       // -------------------------
 
-      const forwarded =
-        req.headers["x-forwarded-for"];
+      res.setHeader(
+        "Access-Control-Allow-Origin",
+        "*"
+      );
 
-      const ip = forwarded
-        ? forwarded.split(",")[0].trim()
-        : req.socket.remoteAddress;
+      res.setHeader(
+        "Access-Control-Allow-Headers",
+        "Content-Type"
+      );
 
-      // -------------------------
-      // レート制限
-      // -------------------------
+      res.setHeader(
+        "Access-Control-Allow-Methods",
+        "POST, OPTIONS"
+      );
 
-      if (isRateLimited(ip)) {
-        res.writeHead(429, {
-          "Content-Type":
-            "application/json; charset=utf-8"
-        });
-
-        res.end(JSON.stringify({
-          result:
-            "短時間に多くのリクエストが送信されました。1分ほど待ってからもう一度お試しください。"
-        }));
-
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
         return;
       }
 
       // -------------------------
-      // リクエスト本文を受け取る
+      // /explain
       // -------------------------
 
-      let body = "";
+      if (
+        req.method === "POST" &&
+        req.url === "/explain"
+      ) {
+        const forwarded =
+          req.headers["x-forwarded-for"];
 
-      req.on("data", chunk => {
-        body += chunk;
-      });
+        const ip = forwarded
+          ? forwarded.split(",")[0].trim()
+          : req.socket.remoteAddress;
 
-      req.on("end", async () => {
+        // -------------------------
+        // レート制限
+        // -------------------------
 
-        try {
-          const data = JSON.parse(body);
+        if (isRateLimited(ip)) {
+          res.writeHead(429, {
+            "Content-Type":
+              "application/json; charset=utf-8"
+          });
 
-          const text = data.text;
-          const mode = data.mode;
-          const language = data.language;
+          res.end(JSON.stringify({
+            result:
+              "短時間に多くのリクエストが送信されました。1分ほど待ってからもう一度お試しください。"
+          }));
 
-          console.log("受け取ったmode:", mode);
-          console.log(
-            "受け取ったlanguage:",
-            language
-          );
+          return;
+        }
 
-          // -------------------------
-          // 入力チェック
-          // -------------------------
+        let body = "";
 
-          if (
-            !text ||
-            typeof text !== "string"
-          ) {
-            res.writeHead(400, {
-              "Content-Type":
-                "application/json; charset=utf-8"
-            });
+        req.on("data", chunk => {
+          body += chunk;
+        });
 
-            res.end(JSON.stringify({
-              result:
-                "解説する文章がありません。"
-            }));
+        req.on("end", async () => {
+          try {
+            const data = JSON.parse(body);
 
-            return;
-          }
+            const text = data.text;
+            const mode = data.mode;
+            const language = data.language;
 
-          // 最大5000文字
-          if (text.length > 5000) {
-            res.writeHead(413, {
-              "Content-Type":
-                "application/json; charset=utf-8"
-            });
+            console.log(
+              "受け取ったmode:",
+              mode
+            );
 
-            res.end(JSON.stringify({
-              result:
-                "文章が長すぎます。5000文字以内で選択してください。"
-            }));
+            console.log(
+              "受け取ったlanguage:",
+              language
+            );
 
-            return;
-          }
+            // -------------------------
+            // 入力チェック
+            // -------------------------
 
-          // -------------------------
-          // Geminiへの指示
-          // -------------------------
+            if (
+              !text ||
+              typeof text !== "string"
+            ) {
+              res.writeHead(400, {
+                "Content-Type":
+                  "application/json; charset=utf-8"
+              });
 
-          let instruction = "";
+              res.end(JSON.stringify({
+                result:
+                  "解説する文章がありません。"
+              }));
 
-          // -------------------------
-          // かんたん
-          // -------------------------
+              return;
+            }
 
-          if (mode === "easy") {
+            if (text.length > 5000) {
+              res.writeHead(413, {
+                "Content-Type":
+                  "application/json; charset=utf-8"
+              });
 
-            if (language === "en") {
-              instruction = `
+              res.end(JSON.stringify({
+                result:
+                  "文章が長すぎます。5000文字以内で選択してください。"
+              }));
+
+              return;
+            }
+
+            // -------------------------
+            // Geminiへの指示
+            // -------------------------
+
+            let instruction = "";
+
+            // -------------------------
+            // かんたん
+            // -------------------------
+
+            if (mode === "easy") {
+              if (language === "en") {
+                instruction = `
 You are a tutor for beginners.
 
 Explain the following text in simple English.
@@ -198,8 +238,8 @@ Conditions:
 - Include one simple example
 - Avoid unnecessary background information
 `;
-            } else {
-              instruction = `
+              } else {
+                instruction = `
 あなたは初心者向けの家庭教師です。
 
 次の文章を、とにかくやさしい日本語で説明してください。
@@ -211,17 +251,16 @@ Conditions:
 - 具体例を1つ入れる
 - 細かい背景説明は省く
 `;
+              }
             }
-          }
 
-          // -------------------------
-          // 詳しく
-          // -------------------------
+            // -------------------------
+            // 詳しく
+            // -------------------------
 
-          if (mode === "detail") {
-
-            if (language === "en") {
-              instruction = `
+            if (mode === "detail") {
+              if (language === "en") {
+                instruction = `
 You are a university-level instructor.
 
 Explain the following text in detail.
@@ -234,8 +273,8 @@ Conditions:
 - Use bullet points when useful
 - Do not make the explanation too short
 `;
-            } else {
-              instruction = `
+              } else {
+                instruction = `
 あなたは大学の講師です。
 
 次の文章を詳しく解説してください。
@@ -248,17 +287,16 @@ Conditions:
 - 必要なら箇条書きを使う
 - 短くまとめすぎない
 `;
+              }
             }
-          }
 
-          // -------------------------
-          // 要約
-          // -------------------------
+            // -------------------------
+            // 要約
+            // -------------------------
 
-          if (mode === "summary") {
-
-            if (language === "en") {
-              instruction = `
+            if (mode === "summary") {
+              if (language === "en") {
+                instruction = `
 You are an expert at summarizing text.
 
 Summarize the following text.
@@ -270,8 +308,8 @@ Conditions:
 - Keep each point short
 - Do not add information that is not in the original text
 `;
-            } else {
-              instruction = `
+              } else {
+                instruction = `
 あなたは文章要約の専門家です。
 
 次の文章を要約してください。
@@ -283,86 +321,111 @@ Conditions:
 - 1項目は短くする
 - 元の文章にない情報を追加しない
 `;
+              }
             }
-          }
 
-          // -------------------------
-          // modeが無い場合
-          // -------------------------
+            // -------------------------
+            // modeが無い場合
+            // -------------------------
 
-          if (!instruction) {
-
-            if (language === "en") {
-              instruction = `
+            if (!instruction) {
+              if (language === "en") {
+                instruction = `
 Explain the following text clearly in English.
 `;
-            } else {
-              instruction = `
+              } else {
+                instruction = `
 次の文章を初心者にもわかるように、
 日本語で簡潔に説明してください。
 `;
+              }
             }
-          }
 
-          // -------------------------
-          // Gemini API
-          // -------------------------
+            // -------------------------
+            // Gemini API
+            // -------------------------
 
-          const response =
-            await ai.models.generateContent({
-              model:
-                "gemini-3.5-flash-lite",
+            const response =
+              await generateWithRetry(
+                ai,
+                {
+                  model:
+                    "gemini-3.5-flash-lite",
 
-              contents: `${instruction}
+                  contents: `${instruction}
 
 Text to process:
 
 ${text}`
+                }
+              );
+
+            // -------------------------
+            // 成功
+            // -------------------------
+
+            res.writeHead(200, {
+              "Content-Type":
+                "application/json; charset=utf-8"
             });
 
-          // -------------------------
-          // 成功
-          // -------------------------
+            res.end(JSON.stringify({
+              result: response.text
+            }));
 
-          res.writeHead(200, {
-            "Content-Type":
-              "application/json; charset=utf-8"
-          });
+          } catch (error) {
+            console.error(error);
 
-          res.end(JSON.stringify({
-            result: response.text
-          }));
+            const message =
+              String(error?.message || "");
 
-        } catch (error) {
+            const isTemporary =
+              message.includes("503") ||
+              message.includes("UNAVAILABLE") ||
+              message.includes("high demand");
 
-          console.error(error);
+            // Gemini混雑時
+            if (isTemporary) {
+              res.writeHead(503, {
+                "Content-Type":
+                  "application/json; charset=utf-8"
+              });
 
-          res.writeHead(500, {
-            "Content-Type":
-              "application/json; charset=utf-8"
-          });
+              res.end(JSON.stringify({
+                result:
+                  "現在AIが混雑しています。少し待ってからもう一度お試しください。"
+              }));
 
-          res.end(JSON.stringify({
-            result:
-              "解説の取得に失敗しました"
-          }));
-        }
+              return;
+            }
+
+            // その他のエラー
+            res.writeHead(500, {
+              "Content-Type":
+                "application/json; charset=utf-8"
+            });
+
+            res.end(JSON.stringify({
+              result:
+                "解説の取得に失敗しました。"
+            }));
+          }
+        });
+
+        return;
+      }
+
+      // -------------------------
+      // それ以外
+      // -------------------------
+
+      res.writeHead(404, {
+        "Content-Type":
+          "text/plain; charset=utf-8"
       });
 
-      return;
-    }
-
-    // -------------------------
-    // それ以外
-    // -------------------------
-
-    res.writeHead(404, {
-      "Content-Type":
-        "text/plain; charset=utf-8"
+      res.end("Not Found");
     });
-
-    res.end("Not Found");
-  });
 
   // -------------------------
   // サーバー起動
